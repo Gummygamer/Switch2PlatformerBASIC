@@ -1,0 +1,9 @@
+{
+  "line_delay": 0.5,
+  "invert_letter_shift": true,
+  "key_delay": 0.03,
+  "mode": "disabled",
+  "start_delay": 30,
+  "armed": false,
+  "control_delay": 0.2
+}

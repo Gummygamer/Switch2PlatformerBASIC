@@ -1,0 +1,275 @@
+' GRAVITY LAB - SmileBASIC 4
+' SI units: meters, seconds, kilograms. Y points down.
+' Solid disk platformer: torque, inertia, Coulomb friction.
+' Stick / D-pad: motor. A: jump. B: brake. X: respawn.
+' Four 1/240 s steps per displayed 60 Hz frame.
+ACLS
+XSCREEN 1280,720
+DIM AX[64],AY[64],BX[64],BY[64]
+DIM OX[64],OY[64],UX[64],UY[64]
+DIM MU[64],JN[64],JT[64],BO[64]
+DIM MX[64],MY[64],HZ[64],PH[64]
+N=0
+R=0.25:M=1:IM=1/M
+II=2/(M*R*R)
+G=9.81:DT=1/240:SCALE=64
+CHARGE=1:EM=1
+TIME=0:ANGLE=0:CAMX=0:CAMY=0
+HOME=2:HOMEY=5.5:WON=0:DEATHS=0
+SKY=RGB(15,23,38):WHITE=RGB(235,242,255)
+STONE=RGB(124,151,166):ICE=RGB(105,220,255)
+RUBBER=RGB(244,175,89):GREEN=RGB(100,240,150)
+' Segment data: endpoints, friction, motion amplitudes,
+' angular frequency in rad/s, phase. Platforms translate.
+RESTORE @WORLD
+READ COUNT
+FOR I=0 TO COUNT-1
+ READ AX[I],AY[I],BX[I],BY[I],MU[I]
+ READ MX[I],MY[I],HZ[I],PH[I]
+NEXT
+N=COUNT
+GOSUB @RESET
+@MAIN
+STICK 0 OUT INPUTX,INPUTY
+IF ABS(INPUTX)<0.12 THEN INPUTX=0
+IF BUTTON(0,#B_LLEFT) THEN INPUTX=-1
+IF BUTTON(0,#B_LRIGHT) THEN INPUTX=1
+BRAKE=BUTTON(0,#B_RDOWN)
+IF BUTTON(0,#B_RRIGHT,1) THEN BUFFER=0.12
+IF BUTTON(0,#B_RUP,1) THEN GOSUB @RESET
+IF BUTTON(0,#B_RLEFT,1) THEN EM=1-EM
+FOR SUBSTEP=0 TO 3
+ GOSUB @STEP
+NEXT
+IF X>25 AND X<29 AND Y<5 THEN
+ HOME=26:HOMEY=3.5
+ENDIF
+IF X>51 AND Y<4.5 THEN WON=1
+IF Y>19 OR X< -5 OR X>58 THEN
+ DEATHS=DEATHS+1:GOSUB @RESET
+ENDIF
+CAMX=CAMX+(X*SCALE-430-CAMX)*0.09
+CAMY=CAMY+(Y*SCALE-370-CAMY)*0.07
+GOSUB @DRAW
+VSYNC 1
+GOTO @MAIN
+
+@RESET
+X=HOME:Y=HOMEY:VX=0:VY=0:OMEGA=0:ANGLE=0
+GROUNDED=0:BUFFER=0:LOCK=0
+CAMX=X*SCALE-430:CAMY=Y*SCALE-370
+RETURN
+
+@STEP
+BUFFER=MAX(0,BUFFER-DT):LOCK=MAX(0,LOCK-DT)
+' Gravity and Lorentz force, in SI units.
+' Uniform fields inside marked rectangular regions.
+' Screen axes: +X right, +Y down, +B into the screen.
+EX=0:EY=0:BZ=0
+IF EM THEN
+ IF X>=30 AND X<=39 AND Y>=1 AND Y<=10 THEN EY=-5
+ IF X>=42 AND X<=49 AND Y>=2 AND Y<=10 THEN BZ=1.6
+ENDIF
+' Boris rotation: magnetic force changes direction, not
+' kinetic energy. Gravity/E use symmetric half-kicks.
+HALFX=CHARGE*EX*IM*DT/2
+HALFY=(G+CHARGE*EY*IM)*DT/2
+VMX=VX+HALFX:VMY=VY+HALFY
+BT=CHARGE*BZ*IM*DT/2:BS=2*BT/(1+BT*BT)
+VPX=VMX+VMY*BT:VPY=VMY-VMX*BT
+VX=VMX+VPY*BS+HALFX
+VY=VMY-VPX*BS+HALFY
+' A torque-controlled motor; no horizontal force in air.
+' Torque tapers to zero at 20 rad/s (~5 m/s rolling).
+TORQUE=INPUTX*0.8
+IF INPUTX*OMEGA>20 THEN TORQUE=0
+OMEGA=OMEGA+TORQUE*II*DT
+IF BRAKE THEN OMEGA=OMEGA/(1+18*DT)
+' Small aerodynamic drag, proportional to speed squared.
+SPD=SQR(VX*VX+VY*VY)
+DRAG=1/(1+0.003*SPD*DT)
+VX=VX*DRAG:VY=VY*DRAG
+' Jump impulse along the last supporting surface normal.
+' Preserve platform velocity already acquired by contact.
+IF BUFFER>0 AND GROUNDED AND LOCK==0 THEN
+ VN=VX*GNX+VY*GNY
+ ADD=MAX(0,5.8-(VN-GPVX*GNX-GPVY*GNY))
+ VX=VX+GNX*ADD:VY=VY+GNY*ADD
+ BUFFER=0:LOCK=0.08:GROUNDED=0
+ENDIF
+X=X+VX*DT:Y=Y+VY*DT
+TIME=TIME+DT
+' Platform positions and exact displacement velocities.
+FOR I=0 TO N-1
+ OLDX=OX[I]:OLDY=OY[I]
+ OX[I]=MX[I]*SIN(TIME*HZ[I]+PH[I])
+ OY[I]=MY[I]*SIN(TIME*HZ[I]+PH[I])
+ UX[I]=(OX[I]-OLDX)/DT:UY[I]=(OY[I]-OLDY)/DT
+ JN[I]=0:JT[I]=0:BO[I]=0
+ GOSUB @CONTACT
+ IF HIT THEN
+  VN=(VX-UX[I])*NX+(VY-UY[I])*NY
+  IF VN< -1 THEN BO[I]=-0.08*VN
+ ENDIF
+NEXT
+' Accumulated sequential impulses: normal + friction.
+' Multiple passes handle simultaneous floor/wall contacts.
+FOR PASS=0 TO 7
+ FOR I=0 TO N-1
+  GOSUB @CONTACT
+  IF HIT THEN
+   VN=(VX-UX[I])*NX+(VY-UY[I])*NY
+   OLD=JN[I]
+   JN[I]=MAX(0,OLD+(BO[I]-VN)/IM)
+   IMP=JN[I]-OLD
+   VX=VX+NX*IMP*IM:VY=VY+NY*IMP*IM
+   TX=-NY:TY=NX
+   ' Contact lever arm is -R*normal; spin contributes -wR.
+   VT=(VX-UX[I])*TX+(VY-UY[I])*TY-OMEGA*R
+   OLD=JT[I]:LIMIT=MU[I]*JN[I]
+   JT[I]=MAX(-LIMIT,MIN(LIMIT,OLD-VT/(IM+R*R*II)))
+   IMP=JT[I]-OLD
+   VX=VX+TX*IMP*IM:VY=VY+TY*IMP*IM
+   OMEGA=OMEGA-R*IMP*II
+  ENDIF
+ NEXT
+NEXT
+' Separate positional correction avoids artificial energy.
+FOR PASS=0 TO 2
+ FOR I=0 TO N-1
+  GOSUB @CONTACT
+  IF HIT THEN
+   CORR=MAX(0,R-DIST-0.0001)*0.8
+   X=X+NX*CORR:Y=Y+NY*CORR
+  ENDIF
+ NEXT
+NEXT
+GROUNDED=0:BEST=0
+FOR I=0 TO N-1
+ GOSUB @CONTACT
+ IF HIT AND NY< -0.45 AND LOCK==0 THEN
+  VN=(VX-UX[I])*NX+(VY-UY[I])*NY
+  IF VN<0.2 AND -NY>BEST THEN
+   GROUNDED=1:BEST=-NY:GNX=NX:GNY=NY
+   GPVX=UX[I]:GPVY=UY[I]
+  ENDIF
+ ENDIF
+NEXT
+ANGLE=ANGLE+OMEGA*DT
+IF ABS(ANGLE)>100 THEN ANGLE=ANGLE-2*#PI*FLOOR(ANGLE/(2*#PI))
+RETURN
+
+@CONTACT
+' Exact closest point on a finite, two-sided segment.
+' Handles slopes, vertical walls, undersides and endpoints.
+SX=AX[I]+OX[I]:SY=AY[I]+OY[I]
+DX=BX[I]-AX[I]:DY=BY[I]-AY[I]
+LEN2=DX*DX+DY*DY
+U=MAX(0,MIN(1,((X-SX)*DX+(Y-SY)*DY)/LEN2))
+NX=X-(SX+U*DX):NY=Y-(SY+U*DY)
+DIST=SQR(NX*NX+NY*NY):HIT=0
+IF DIST>R+0.002 THEN RETURN
+HIT=1
+IF DIST>0.000001 THEN
+ NX=NX/DIST:NY=NY/DIST
+ELSE
+ LL=SQR(LEN2):NX=DY/LL:NY=-DX/LL
+ IF (VX-UX[I])*NX+(VY-UY[I])*NY>0 THEN
+  NX=-NX:NY=-NY
+ ENDIF
+ENDIF
+RETURN
+
+@DRAW
+GCLS SKY
+IF EM THEN
+ GFILL 30*SCALE-CAMX,1*SCALE-CAMY,39*SCALE-CAMX,10*SCALE-CAMY,RGB(20,40,62)
+ GFILL 42*SCALE-CAMX,2*SCALE-CAMY,49*SCALE-CAMX,10*SCALE-CAMY,RGB(43,26,54)
+ FOR I=30 TO 38
+  GX=(I+0.5)*SCALE-CAMX:GY=7*SCALE-CAMY
+  GLINE GX,GY,GX,GY-32,ICE
+  GLINE GX,GY-32,GX-5,GY-24,ICE
+  GLINE GX,GY-32,GX+5,GY-24,ICE
+ NEXT
+ FOR I=42 TO 48
+  GX=(I+0.5)*SCALE-CAMX:GY=7*SCALE-CAMY
+  GCIRCLE GX,GY,7,RUBBER
+  GLINE GX-4,GY-4,GX+4,GY+4,RUBBER
+  GLINE GX-4,GY+4,GX+4,GY-4,RUBBER
+ NEXT
+ENDIF
+' Meter grid makes acceleration and jump scale visible.
+FOR I=0 TO 21
+ GX=I*64-(CAMX-FLOOR(CAMX/64)*64)
+ GLINE GX,0,GX,719,RGB(24,34,51)
+NEXT
+FOR I=0 TO 12
+ GY=I*64-(CAMY-FLOOR(CAMY/64)*64)
+ GLINE 0,GY,1279,GY,RGB(24,34,51)
+NEXT
+FOR I=0 TO N-1
+ X1=(AX[I]+OX[I])*SCALE-CAMX
+ Y1=(AY[I]+OY[I])*SCALE-CAMY
+ X2=(BX[I]+OX[I])*SCALE-CAMX
+ Y2=(BY[I]+OY[I])*SCALE-CAMY
+ COL=STONE
+ IF MU[I]<0.1 THEN COL=ICE
+ IF MU[I]>0.9 THEN COL=RUBBER
+ IF HZ[I]>0 THEN COL=GREEN
+ GLINE X1,Y1,X2,Y2,COL
+ GLINE X1,Y1+1,X2,Y2+1,COL
+NEXT
+' Checkpoint and goal flags.
+FOR I=0 TO 1
+ FX=(26+26*I)*SCALE-CAMX
+ FY=(4.2-0.2*I)*SCALE-CAMY
+ GLINE FX,FY,FX,FY-70,GREEN
+ GBOX FX,FY-70,FX+32,FY-48,GREEN
+NEXT
+PX=X*SCALE-CAMX:PY=Y*SCALE-CAMY
+GCIRCLE PX,PY,R*SCALE,WHITE
+GCIRCLE PX,PY,R*SCALE-1,WHITE
+GLINE PX,PY,PX+COS(ANGLE)*R*SCALE,PY+SIN(ANGLE)*R*SCALE,RUBBER
+IF GROUNDED THEN
+ GLINE PX,PY,PX+GNX*27,PY+GNY*27,GREEN
+ENDIF
+LOCATE 0,0
+PRINT "GRAVITY LAB | g = 9.81 m/s^2 | physics 240 Hz"
+PRINT "Stick/D-pad: roll   A: jump   B: brake   X: respawn   Y: fields"
+PRINT "Blue: ice   Orange: rubber   Green: moving platform"
+PRINT "VX ";FLOOR(VX*100)/100;" m/s   VY ";FLOOR(VY*100)/100;" m/s       "
+PRINT "Deaths ";DEATHS;"   Checkpoint ";HOME;" m        "
+PRINT "q = +1 C   Fields ";EM;"   E up: 5 N/C   B inward: 1.6 T       "
+IF WON THEN PRINT "FINISH! Explore or press X to return to checkpoint."
+RETURN
+
+@WORLD
+DATA 23
+' Start, downhill, ice valley, climb.
+DATA -2,8,6,8,0.7,0,0,0,0
+DATA -2,5,-2,8,0.7,0,0,0,0
+DATA 6,8,10,10,0.7,0,0,0,0
+DATA 10,10,15,10,0.025,0,0,0,0
+DATA 15,10,19,8,0.7,0,0,0,0
+DATA 19,8,22,8,1.1,0,0,0,0
+' Elevator and checkpoint ledge.
+DATA 22.5,8,25,8,0.9,0,-2.5,0.7,0
+DATA 25,4.2,29,4.2,0.8,0,0,0,0
+' A lower route catches missed jumps.
+DATA 22,13,32,13,0.7,0,0,0,0
+DATA 32,13,36,11,0.7,0,0,0,0
+DATA 36,11,40,11,0.7,0,0,0,0
+' Moving bridge: time-zero offsets are all zero.
+DATA 30,5.5,33,5.5,0.8,2,0,0.65,0
+DATA 35,6.5,38,6.5,0.8,0,-2,0.8,0
+DATA 39,5,42,5,1.1,0,0,0,0
+DATA 42,5,45,6.5,0.025,0,0,0,0
+DATA 45,6.5,48,6.5,0.025,0,0,0,0
+DATA 48,6.5,51,4,1.1,0,0,0,0
+DATA 51,4,55,4,0.8,0,0,0,0
+DATA 55,4,55,1,0.8,0,0,0,0
+' Solid underside demonstration and recovery shelf.
+DATA 11,6.8,14,6.8,0.7,0,0,0,0
+DATA 40,13,47,13,0.7,0,0,0,0
+DATA 47,13,50,11,1.1,0,0,0,0
+DATA 50,11,54,11,0.9,0,-3,0.6,0

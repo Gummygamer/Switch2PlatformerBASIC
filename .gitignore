@@ -1,0 +1,15 @@
+# Local device backups and transfer state
+pico-backups/
+pico-transfer.json
+pico/settings.json
+pico/bootstrap.bas
+pico/nes.bas
+pico/session.json
+pico/status.json
+
+# Python and local environment files
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
